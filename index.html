@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>AR Stickers</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #111; font-family: system-ui, -apple-system, sans-serif; }
+  #ar { position: fixed; inset: 0; }
+  #start {
+    position: fixed; inset: 0; z-index: 10; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 18px; text-align: center; padding: 24px;
+    background: #fdf6e3; color: #3b3f8f;
+  }
+  #start h1 { margin: 0; font-size: 28px; }
+  #start p { margin: 0; max-width: 300px; line-height: 1.4; font-size: 15px; }
+  #go {
+    font: inherit; font-size: 20px; font-weight: 700; padding: 14px 40px; border: 3px solid #3b3f8f;
+    border-radius: 999px; background: #f4b6d2; color: #3b3f8f; cursor: pointer;
+  }
+  #go:disabled { opacity: .5; }
+  #hint { font-size: 13px; opacity: .7; }
+  #status {
+    position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); z-index: 5;
+    background: rgba(0,0,0,.55); color: #fff; padding: 8px 16px; border-radius: 999px; font-size: 14px;
+    pointer-events: none; transition: opacity .3s;
+  }
+</style>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+    "mindar-image-three": "https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-three.prod.js"
+  }
+}
+</script>
+</head>
+<body>
+<div id="ar"></div>
+
+<div id="start">
+  <h1>✨ AR Stickers ✨</h1>
+  <p>Point your camera at a sticker to bring it to life.</p>
+  <button id="go">Tap to start</button>
+  <p id="hint">Opened from Instagram or another app? Tap ⋯ and choose “Open in browser” so the camera works.</p>
+</div>
+<div id="status" style="opacity:0"></div>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+import { MindARThree } from 'mindar-image-three';
+
+// ───────────────────────── CONFIG ─────────────────────────
+// Order MUST match the order of images when you compiled targets.mind.
+// prefix  = start of the Blender object names for that character
+// size    = how big the character is, relative to the sticker width (1 = same width)
+// lift    = how far it floats toward the camera (in sticker widths)
+// rotY    = turn in degrees (180 because the models face -Z in the export)
+const STICKERS = [
+  { name: 'Butterfly', prefix: 'butterfly', size: 1.0, lift: 0.15, rotY: 180 },
+  { name: 'Egg',       prefix: 'star pet',  size: 1.0, lift: 0.15, rotY: 180 },
+  { name: 'Star',      prefix: 'star tama', size: 1.0, lift: 0.15, rotY: 180 },
+  { name: 'Clover',    prefix: 'flower',    size: 1.0, lift: 0.15, rotY: 180 },
+  { name: 'Poop',      prefix: 'poop',      size: 1.0, lift: 0.15, rotY: 180 },
+];
+const MODEL_URL   = './assets/stickers.glb';
+const TARGETS_URL = './targets/targets.mind';
+// ──────────────────────────────────────────────────────────
+
+const statusEl = document.getElementById('status');
+const showStatus = (t) => { statusEl.textContent = t; statusEl.style.opacity = t ? 1 : 0; };
+const norm = (s) => s.replace(/[\s_]+/g, ' ').trim().toLowerCase();
+
+function showError(msg) {
+  const btn = document.getElementById('go');
+  const hint = document.getElementById('hint');
+  if (btn) { btn.disabled = false; btn.textContent = 'Try again'; }
+  if (hint) { hint.style.opacity = 1; hint.style.color = '#c0392b'; hint.style.fontWeight = 700; hint.textContent = msg; }
+  console.error(msg);
+}
+
+async function checkFile(url, label) {
+  let res;
+  try { res = await fetch(url, { cache: 'no-store' }); }
+  catch (e) { throw new Error(`Couldn't download ${label} (${url}). Check your internet connection.`); }
+  if (!res.ok) throw new Error(`Missing file: ${url} (error ${res.status}). Check it's uploaded with exactly this name and folder.`);
+  const type = res.headers.get('content-type') || '';
+  if (type.includes('text/html')) throw new Error(`${url} isn't the real ${label}. The server sent back a web page instead.`);
+}
+
+async function start() {
+  const btn = document.getElementById('go');
+  btn.disabled = true; btn.textContent = 'Loading…';
+  try {
+    btn.textContent = 'Checking files…';
+    await checkFile(TARGETS_URL, 'tracking file (targets.mind)');
+    await checkFile(MODEL_URL, '3D model (stickers.glb)');
+    btn.textContent = 'Loading…';
+    await run(btn);
+  } catch (e) {
+    showError(e.message || String(e));
+  }
+}
+
+async function run(btn) {
+
+  const mindar = new MindARThree({
+    container: document.getElementById('ar'),
+    imageTargetSrc: TARGETS_URL,
+    maxTrack: 2,                // up to 2 stickers animating at once
+    filterMinCF: 0.0001,        // smoother tracking (less jitter)
+    filterBeta: 0.001,
+    uiLoading: 'no', uiScanning: 'yes', uiError: 'yes',
+  });
+  const { renderer, scene, camera } = mindar;
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+  scene.add(new THREE.HemisphereLight(0xffffff, 0xbbbbff, 2.2));
+  const sun = new THREE.DirectionalLight(0xffffff, 1.6);
+  sun.position.set(0.5, 1, 2);
+  scene.add(sun);
+
+  btn.textContent = 'Loading model…';
+  let gltf;
+  const draco = new DRACOLoader();
+  draco.setDecoderPath('https://unpkg.com/three@0.160.0/examples/jsm/libs/draco/gltf/');
+  const loader = new GLTFLoader();
+  loader.setDRACOLoader(draco);   // lets you tick "Compression" in Blender's glTF export
+  try { gltf = await loader.loadAsync(MODEL_URL); }
+  catch (e) { throw new Error("Couldn't open stickers.glb. The file may be corrupted. Try uploading it again."); }
+  const mixers = [];
+
+  STICKERS.forEach((cfg, i) => {
+    // Copy the whole scene, then keep only this character's objects
+    const model = gltf.scene.clone(true);
+    [...model.children].forEach((c) => { if (!norm(c.name).startsWith(cfg.prefix)) model.remove(c); });
+
+    // Centre + scale it to the sticker
+    const box = new THREE.Box3().setFromObject(model);
+    const size = box.getSize(new THREE.Vector3());
+    const centre = box.getCenter(new THREE.Vector3());
+    model.position.sub(centre);
+
+    const holder = new THREE.Group();     // scaled + turned
+    holder.add(model);
+    holder.rotation.y = THREE.MathUtils.degToRad(cfg.rotY);
+    const fit = cfg.size / Math.max(size.x, size.y);
+    holder.userData.fit = fit;
+    holder.scale.setScalar(0.0001);
+    holder.position.z = cfg.lift + (size.z * fit) / 2;
+
+    // Only play the animations that belong to this character
+    const mixer = new THREE.AnimationMixer(model);
+    gltf.animations
+      .filter((clip) => clip.tracks.every((t) =>
+        model.getObjectByName(THREE.PropertyBinding.parseTrackName(t.name).nodeName)))
+      .forEach((clip) => mixer.clipAction(clip).play());
+    mixer.timeScale = 0;                  // paused until the sticker is seen
+
+    const anchor = mindar.addAnchor(i);
+    anchor.group.add(holder);
+    const state = { holder, mixer, pop: 0, visible: false };
+    mixers.push(state);
+
+    anchor.onTargetFound = () => { state.visible = true; state.pop = 0; mixer.setTime(0); mixer.timeScale = 1; showStatus(''); };
+    anchor.onTargetLost  = () => { state.visible = false; mixer.timeScale = 0; };
+  });
+
+  btn.textContent = 'Starting camera…';
+  try {
+    await Promise.race([
+      mindar.start(),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 20000)),
+    ]);
+  } catch (e) {
+    if (e.message === 'timeout')
+      throw new Error('The camera or tracking file took too long. If you allowed the camera, recompile targets.mind and upload it again.');
+    if (e.name === 'NotAllowedError')
+      throw new Error('Camera access was blocked. Allow the camera for this site in your browser settings, then try again.');
+    throw new Error('Could not start AR: ' + (e.message || e.name || e) + '. Open this page in Safari or Chrome (not inside Instagram/TikTok).');
+  }
+  document.getElementById('start').remove();
+  showStatus('Point at a sticker');
+
+  // Little "pop out" when a sticker is found
+  const easeOutBack = (t) => 1 + 2.7 * Math.pow(t - 1, 3) + 1.7 * Math.pow(t - 1, 2);
+  const clock = new THREE.Clock();
+  renderer.setAnimationLoop(() => {
+    const dt = clock.getDelta();
+    for (const s of mixers) {
+      s.mixer.update(dt);
+      if (s.visible && s.pop < 1) {
+        s.pop = Math.min(1, s.pop + dt / 0.5);
+        s.holder.scale.setScalar(Math.max(0.0001, s.holder.userData.fit * easeOutBack(s.pop)));
+      } else if (!s.visible) {
+        s.holder.scale.setScalar(0.0001);
+      }
+    }
+    renderer.render(scene, camera);
+  });
+}
+
+document.getElementById('go').addEventListener('click', start);
+</script>
+</body>
+</html>
